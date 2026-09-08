@@ -3,9 +3,7 @@
 A Qt GUI (plus reusable Python library) for aligning and non-uniformly
 rescaling brain-region STLs (e.g. the Allen CCF whole brain and its
 region parts) into a mouse skull STL, using a 3-point landmark method
-(Bregma, Lambda, Ventral). It's a GUI wrapper around the workflow
-originally implemented in
-`objective_functionnality/skull_addapt.py`.
+(Bregma, Lambda, Ventral).
 
 ## Installation (uv only, no conda)
 
@@ -13,7 +11,7 @@ Requires [uv](https://docs.astral.sh/uv/) and Python 3.10+ (uv will
 fetch a matching Python automatically if needed).
 
 ```bash
-cd 3_Combine/rescale_stl
+cd 3_Combine/stlgen_rescale_stl
 uv sync
 ```
 
@@ -24,8 +22,6 @@ This creates a local `.venv` and installs everything from
 
 ```bash
 uv run rescale-stl          # installed console script
-# or
-uv run app.py                # convenience launcher script
 # or
 uv run python -m rescale_app
 ```
@@ -58,9 +54,9 @@ rescaling transform as a JSON file:
    together in the same embedded view.
 5. **Save JSON** writes the transform to the chosen output path.
 
-The saved JSON schema matches the original CLI script's
-`align_config.json` / `brain_to_skull_transform.json`, so files are
-interchangeable between the two tools.
+The saved JSON schema is stable (`align_config.json` /
+`brain_to_skull_transform.json`-style), so transform files are
+interchangeable across runs and machines.
 
 ### 2. Batch Rescale
 
@@ -68,8 +64,7 @@ Apply a previously saved transform JSON to every `.stl` file in a
 folder:
 
 1. Select the **input folder** (containing the STLs to transform) and
-   the **transform JSON** (from step 1, or from the original CLI
-   script).
+   the **transform JSON** (from step 1).
 2. Optionally set an **output folder** — if left blank, it defaults to
    `<input folder name>_rescaled` next to the input folder.
 3. Click **Run Rescale**. Processing runs on a background thread with
@@ -78,17 +73,21 @@ folder:
    path from the transform JSON still resolves) and all the
    transformed output meshes.
 
-## Library layout
+## Project Structure
 
 ```
-rescale_app/
-  core.py        # pure geometry/transform math (no UI, no picking)
-  io_utils.py     # transform JSON load/save, folder listing, batch apply
-  gui/
-    pick_viewer.py    # embedded PyVista/Qt widget with ordered point picking
-    generate_tab.py   # Tab 1
-    batch_tab.py       # Tab 2
-    main_window.py     # tab container
+stlgen_rescale_stl/
+├── pyproject.toml              # dependencies, rescale-stl entry point
+├── README.md                   # this file
+└── rescale_app/
+    ├── __main__.py              # `rescale-stl` / `python -m rescale_app` entry point
+    ├── core.py                  # pure geometry/transform math (no UI, no picking)
+    ├── io_utils.py               # transform JSON load/save, folder listing, batch apply
+    └── gui/
+        ├── pick_viewer.py         # embedded PyVista/Qt widget with ordered point picking
+        ├── generate_tab.py        # Tab 1
+        ├── batch_tab.py            # Tab 2
+        └── main_window.py          # tab container
 ```
 
 `core.py` and `io_utils.py` have no Qt dependency and can be reused
