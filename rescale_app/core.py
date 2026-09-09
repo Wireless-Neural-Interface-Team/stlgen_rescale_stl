@@ -267,6 +267,12 @@ def compute_transform(
         skull_canonical = np.eye(4)
     full_4x4 = skull_canonical @ full_4x4
 
+    bregma_lambda_distance_skull = (
+        float(np.linalg.norm(lm.lambda_skull - lm.bregma_skull))
+        if lm.bregma_skull is not None and lm.lambda_skull is not None
+        else None
+    )
+
     return {
         "skull_stl": str(skull_path),
         "brain_stl": str(brain_path),
@@ -276,6 +282,7 @@ def compute_transform(
         "translation_xyz": translation.tolist(),
         "cavity_scale": cavity_scale,
         "landmarks": lm.as_json(),
+        "bregma_lambda_distance_skull": bregma_lambda_distance_skull,
     }
 
 

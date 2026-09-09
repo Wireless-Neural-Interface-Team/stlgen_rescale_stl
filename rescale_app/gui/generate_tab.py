@@ -29,6 +29,7 @@ from .pick_viewer import (
     BONE_OPACITY_PICK,
     BONE_OPACITY_VIEW,
     BRAIN_COLOR,
+    BRAIN_OPACITY_TRANSPARENT,
     BRAIN_OPACITY_VIEW,
     PickViewer,
     trimesh_to_pv,
@@ -65,7 +66,8 @@ class AxisControl(QWidget):
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.addWidget(QLabel(axis_label))
+        self.label = QLabel(axis_label)
+        layout.addWidget(self.label)
 
         self.slider = QSlider(Qt.Horizontal)
         self.slider.setRange(0, self._SLIDER_STEPS)
@@ -103,6 +105,9 @@ class AxisControl(QWidget):
     def value(self) -> float:
         return self.spin.value()
 
+    def set_axis_label(self, text: str) -> None:
+        self.label.setText(text)
+
     def _on_slider_changed(self, raw: int) -> None:
         if self._updating:
             return
@@ -138,6 +143,8 @@ class GenerateTab(QWidget):
         self._skull_points: list[np.ndarray] = []
         self._brain_points: list[np.ndarray] = []
         self._preview_camera_set = False  # only set a default camera view once per picking session
+        self._vector_mode = False  # axis controls set a displacement vector instead of a new position
+        self._skull_bounds: np.ndarray | None = None  # set whenever the preview is (re)shown
 
         self.viewer = PickViewer()
 
@@ -233,10 +240,28 @@ class GenerateTab(QWidget):
         self.refine_combo.currentIndexChanged.connect(self._on_refine_point_selected)
         refine_layout.addWidget(self.refine_combo)
 
+        transparency_row = QHBoxLayout()
         self.skull_transparency_check = QCheckBox("Skull transparency")
         self.skull_transparency_check.setChecked(True)
-        self.skull_transparency_check.toggled.connect(self._on_skull_transparency_toggled)
-        refine_layout.addWidget(self.skull_transparency_check)
+        self.skull_transparency_check.toggled.connect(self._on_transparency_toggled)
+        transparency_row.addWidget(self.skull_transparency_check)
+
+        self.brain_transparency_check = QCheckBox("Brain transparency")
+        self.brain_transparency_check.setChecked(False)
+        self.brain_transparency_check.toggled.connect(self._on_transparency_toggled)
+        transparency_row.addWidget(self.brain_transparency_check)
+        refine_layout.addLayout(transparency_row)
+
+        self.vector_mode_check = QCheckBox("Vector")
+        self.vector_mode_check.setToolTip(
+            "When checked, the X/Y/Z controls below set a displacement\n"
+            "(dx, dy, dz) applied to the landmark's position as of the last\n"
+            "Compute Transform, instead of setting its absolute new\n"
+            "coordinates: the new position is (x0-dx, y0-dy, z0-dz). An\n"
+            "arrow is drawn from the landmark's old position to the new one."
+        )
+        self.vector_mode_check.toggled.connect(self._on_vector_mode_toggled)
+        refine_layout.addWidget(self.vector_mode_check)
 
         self.axis_x = AxisControl("X")
         self.axis_y = AxisControl("Y")
@@ -512,19 +537,41 @@ class GenerateTab(QWidget):
         return core.xform_pt(np.asarray(display_point), inv)
 
     def _set_axis_ranges(self, bounds: np.ndarray) -> None:
-        pads = (bounds[1] - bounds[0]) * 0.15
-        for axis_ctrl, lo, hi, pad in zip(
-            (self.axis_x, self.axis_y, self.axis_z), bounds[0], bounds[1], pads
-        ):
-            axis_ctrl.set_range(float(lo - pad), float(hi + pad))
+        if self._vector_mode:
+            # Displacement mode: symmetric range around 0. Sized to the full
+            # extent of the bounds along each axis (rather than half of it)
+            # so that, whatever the landmark's baseline position within the
+            # skull, the whole bounds remain reachable in either direction.
+            extents = bounds[1] - bounds[0]
+            for axis_ctrl, extent in zip((self.axis_x, self.axis_y, self.axis_z), extents):
+                axis_ctrl.set_range(float(-extent), float(extent))
+        else:
+            pads = (bounds[1] - bounds[0]) * 0.15
+            for axis_ctrl, lo, hi, pad in zip(
+                (self.axis_x, self.axis_y, self.axis_z), bounds[0], bounds[1], pads
+            ):
+                axis_ctrl.set_range(float(lo - pad), float(hi + pad))
 
     def _on_refine_point_selected(self, idx: int) -> None:
         self._load_axis_values(idx)
+
+    def _baseline_display_point(self, idx: int) -> np.ndarray | None:
+        """The selected landmark's position as of the last Compute
+        Transform, in display space -- the reference point displacement
+        mode's (0, 0, 0) means "no change" relative to."""
+        if self._last_committed_points is None or not (0 <= idx < len(self._last_committed_points)):
+            return None
+        return self._local_to_display(self._last_committed_points[idx])
 
     def _load_axis_values(self, idx: int) -> None:
         if not (0 <= idx < len(self._brain_points)) or self._transform is None:
             return
         point = self._local_to_display(self._brain_points[idx])
+        if self._vector_mode:
+            # The landmark sits at baseline - vector (see `_on_axis_value_changed`),
+            # so the vector that produced the current point is baseline - point.
+            baseline = self._baseline_display_point(idx)
+            point = point if baseline is None else baseline - point
         self.axis_x.set_value(float(point[0]))
         self.axis_y.set_value(float(point[1]))
         self.axis_z.set_value(float(point[2]))
@@ -533,13 +580,24 @@ class GenerateTab(QWidget):
         idx = self.refine_combo.currentIndex()
         if not (0 <= idx < len(self._brain_points)) or self._transform is None:
             return
-        display_point = np.array([self.axis_x.value(), self.axis_y.value(), self.axis_z.value()])
+        values = np.array([self.axis_x.value(), self.axis_y.value(), self.axis_z.value()])
+        baseline = self._baseline_display_point(idx)
+        if self._vector_mode:
+            # Plain coordinate displacement to (baseline - vector): moving
+            # dX/dY/dZ by (dx, dy, dz) displaces the landmark by -(dx, dy, dz).
+            display_point = values if baseline is None else baseline - values
+        else:
+            display_point = values
         # Store back in the brain's own frame, so "Compute Transform" keeps
         # working from the same raw-landmark inputs as before; only the
         # marker moves live here, in the space the preview is shown in.
         self._brain_points[idx] = self._display_to_local(display_point)
         self._transform_dirty = True
-        self.viewer.move_marker(idx, display_point)
+        # In vector mode, draw an arrow whose fixed tail is the landmark's
+        # old (baseline) position and whose tip tracks the new, displaced
+        # position exactly, so the displacement is visible in the view.
+        origin = baseline if self._vector_mode else None
+        self.viewer.move_marker(idx, display_point, origin=origin)
         self._refresh_buttons()
 
     def _on_reset_axis(self, axis_index: int) -> None:
@@ -552,16 +610,39 @@ class GenerateTab(QWidget):
             or not (0 <= idx < len(self._last_committed_points))
         ):
             return
-        baseline_display = self._local_to_display(self._last_committed_points[idx])
         axis_ctrl = (self.axis_x, self.axis_y, self.axis_z)[axis_index]
-        axis_ctrl.set_value(float(baseline_display[axis_index]))
+        if self._vector_mode:
+            # Baseline itself is the (0, 0, 0) displacement.
+            axis_ctrl.set_value(0.0)
+        else:
+            baseline_display = self._baseline_display_point(idx)
+            axis_ctrl.set_value(float(baseline_display[axis_index]))
         # `set_value` doesn't emit `valueChanged` (it's used for silent,
         # programmatic updates), so drive the usual edit path by hand,
         # using whatever the three spinboxes now read.
         self._on_axis_value_changed(0.0)
 
-    def _on_skull_transparency_toggled(self, _checked: bool) -> None:
+    def _on_transparency_toggled(self, _checked: bool) -> None:
         self._show_preview_with_markers()
+
+    def _on_vector_mode_toggled(self, checked: bool) -> None:
+        self._vector_mode = checked
+        for axis_ctrl, base in zip((self.axis_x, self.axis_y, self.axis_z), ("X", "Y", "Z")):
+            axis_ctrl.set_axis_label(f"d{base}" if checked else base)
+        self.viewer.set_point_radius_scale(0.25 if checked else 1.0)
+        if self._transform is None:
+            return
+        if self._skull_bounds is not None:
+            self._set_axis_ranges(self._skull_bounds)
+        idx = self.refine_combo.currentIndex()
+        self._load_axis_values(idx)
+        # Immediately reflect the mode switch on the currently selected
+        # point's marker (add/remove its origin ghost + arrow); other,
+        # unselected points keep whatever they last showed.
+        if 0 <= idx < len(self._brain_points):
+            point = self._local_to_display(self._brain_points[idx])
+            origin = self._baseline_display_point(idx) if checked else None
+            self.viewer.move_marker(idx, point, origin=origin)
 
     # -------------------------------------------------------------- compute
 
@@ -649,12 +730,13 @@ class GenerateTab(QWidget):
             return
 
         skull_opacity = BONE_OPACITY_VIEW if self.skull_transparency_check.isChecked() else 1.0
+        brain_opacity = BRAIN_OPACITY_TRANSPARENT if self.brain_transparency_check.isChecked() else BRAIN_OPACITY_VIEW
 
         self.viewer.clear()
         self.viewer.show_mesh_object(trimesh_to_pv(skull_mesh), "preview_skull",
                                      BONE_COLOR, skull_opacity)
         self.viewer.show_mesh_object(trimesh_to_pv(brain_mesh), "preview_brain",
-                                     BRAIN_COLOR, BRAIN_OPACITY_VIEW)
+                                     BRAIN_COLOR, brain_opacity)
         if not self._preview_camera_set:
             # Only frame the scene the first time it's shown for this
             # picking session; later refreshes (recompute, undo/redo,
@@ -664,7 +746,8 @@ class GenerateTab(QWidget):
             self.viewer.plotter.view_xz()
             self._preview_camera_set = True
 
-        self._set_axis_ranges(skull_mesh.bounds)
+        self._skull_bounds = skull_mesh.bounds
+        self._set_axis_ranges(self._skull_bounds)
         display_points = [self._local_to_display(p) for p in self._brain_points]
         self.viewer.set_markers(LANDMARK_LABELS, display_points)
         self._load_axis_values(self.refine_combo.currentIndex())

@@ -21,6 +21,7 @@ BONE_OPACITY_PICK = 0.55
 BONE_OPACITY_VIEW = .55
 BRAIN_COLOR = "#e87060"
 BRAIN_OPACITY_VIEW = 1.0
+BRAIN_OPACITY_TRANSPARENT = 0.35
 REGION_COLOR = "#8b0000"
 REGION_OPACITY_VIEW = 1.0
 WHOLE_BRAIN_FILENAME = "whole_brain.stl"
@@ -74,6 +75,7 @@ class PickViewer(QWidget):
         self._picked: list[np.ndarray] = []
         self._picking_enabled = False
         self._mesh_length = 1.0
+        self._point_radius_scale = 1.0  # shrinks `set_markers`/`move_marker` spheres (e.g. in vector mode)
 
         # Custom press/release picking (see `_enable_picking`) instead of
         # pyvista's built-in click-picking, which fires on button *press*
@@ -166,6 +168,12 @@ class PickViewer(QWidget):
             return self._labels[len(self._picked)]
         return None
 
+    def set_point_radius_scale(self, scale: float) -> None:
+        """Scale factor applied to the sphere radius in `set_markers` and
+        `move_marker` (e.g. shrink to a quarter size in vector mode, where
+        the arrow is the primary visual and the point is just its tail)."""
+        self._point_radius_scale = scale
+
     def set_markers(self, labels: list[str], points: list[np.ndarray]) -> None:
         """Show a fixed set of markers, not tied to click-based picking.
 
@@ -174,7 +182,7 @@ class PickViewer(QWidget):
         """
         self._labels = list(labels)
         self._picked = [np.asarray(p) for p in points]
-        radius = self._mesh_length * 0.012
+        radius = self._mesh_length * 0.012 * self._point_radius_scale
         for idx, point in enumerate(self._picked):
             color = PICK_COLORS[idx % len(PICK_COLORS)]
             self.plotter.add_mesh(pv.Sphere(radius=radius, center=point), color=color,
@@ -184,19 +192,43 @@ class PickViewer(QWidget):
                 name=f"label_{idx}", always_visible=True,
             )
 
-    def move_marker(self, idx: int, point: np.ndarray) -> None:
+    def move_marker(self, idx: int, point: np.ndarray, origin: Optional[np.ndarray] = None) -> None:
         """Reposition an already-placed landmark marker/label in place.
 
-        Cheap (repositions one small sphere + label), unlike recomputing
-        the transform or the transformed mesh, so callers can use this for
-        live feedback while the point coordinate is still being edited.
+        Cheap (repositions one small sphere + label, plus an optional
+        arrow), unlike recomputing the transform or the transformed mesh,
+        so callers can use this for live feedback while the point
+        coordinate is still being edited.
+
+        `point` is always the landmark's actual (current) position -- the
+        solid, labeled sphere is drawn there (its radius scaled by
+        `set_point_radius_scale`). If `origin` is given and distinct from
+        `point`, an arrow is drawn from a fixed, dimmed "ghost" sphere at
+        `origin`, with its tip mirroring `point` through `origin` --
+        i.e. the tip sits at ``2*origin - point``, moving in the opposite
+        direction from `point` itself.
         """
         if idx >= len(self._picked):
             return
         point = np.asarray(point)
         self._picked[idx] = point
         color = PICK_COLORS[idx % len(PICK_COLORS)]
-        radius = self._mesh_length * 0.012
+        radius = self._mesh_length * 0.012 * self._point_radius_scale
+
+        self.plotter.remove_actor(f"pick_origin_{idx}")
+        self.plotter.remove_actor(f"pick_vector_{idx}")
+        if origin is not None:
+            origin = np.asarray(origin)
+            vec = origin - point  # mirrored: tip = origin + vec = 2*origin - point
+            length = float(np.linalg.norm(vec))
+            if length > 1e-9:
+                self.plotter.add_mesh(
+                    pv.Sphere(radius=radius * 0.7, center=origin), color=color,
+                    opacity=0.35, name=f"pick_origin_{idx}", pickable=False,
+                )
+                arrow = pv.Arrow(start=origin, direction=vec / length, scale=length)
+                self.plotter.add_mesh(arrow, color=color, name=f"pick_vector_{idx}", pickable=False)
+
         self.plotter.add_mesh(pv.Sphere(radius=radius, center=point), color=color,
                               name=f"pick_{idx}", pickable=False)
         self.plotter.add_point_labels(
